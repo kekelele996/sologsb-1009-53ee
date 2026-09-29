@@ -162,6 +162,23 @@ sl-textarea::part(textarea) { line-height: 1.65; }
 .term-add { display: grid; grid-template-columns: 1fr 1fr auto; gap: 7px; margin-top: 12px; align-items: center; }
 .term-add sl-input { margin: 0; }
 
+.export-blocker-dialog::part(panel) { max-width: 640px; }
+.export-blocker-dialog::part(body) { max-height: 56vh; overflow-y: auto; }
+.blocker-intro { margin: 0 0 14px; padding: 11px 13px; border: 1px solid #efd1ce; border-left: 4px solid var(--red); border-radius: 9px; background: #fff8f7; color: #5d4a47; font-size: 12px; line-height: 1.65; }
+.blocker-intro b { color: #a72f27; }
+.blocker-groups { display: grid; gap: 10px; }
+.blocker-group { border: 1px solid #e4d8d6; border-left: 4px solid var(--red); border-radius: 10px; padding: 11px 13px; background: #fff; }
+.blocker-group header { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+.blocker-loc { min-width: 0; }
+.blocker-loc b { display: block; font-size: 12px; color: #37453f; }
+.blocker-loc span { display: block; color: #8a7c78; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blocker-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.blocker-group li { border-top: 1px dashed #e5dddb; padding-top: 8px; }
+.blocker-group li:first-child { border-top: 0; padding-top: 0; }
+.blocker-group li strong { display: block; font-size: 11px; color: #a72f27; }
+.blocker-group li p { margin: 4px 0 3px; color: #57645f; font-size: 11px; line-height: 1.55; }
+.blocker-group li small { color: #33705b; font-size: 10px; }
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #b9c2bd; border: 3px solid transparent; border-radius: 99px; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }

@@ -327,6 +327,11 @@ function blockRole(block: ContentBlock) {
   return "正文段落";
 }
 
+function blockSnippet(block: ContentBlock, max = 24) {
+  const value = (block.accessibleText || block.text || "（空）").replace(/\s+/g, "");
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
 function statusLabel(status: ReviewStatus) {
   if (status === "approved") return "已通过";
   if (status === "needs-work") return "需修改";
@@ -339,19 +344,32 @@ function severityLabel(severity: Severity) {
   return "一致性提醒";
 }
 
+function exportBlockContent(block: ContentBlock) {
+  if (block.type === "heading") {
+    const level = Math.min(6, Math.max(1, block.headingLevel ?? 2));
+    return `<h${level}>${escapeHtml(block.accessibleText || block.text)}</h${level}>`;
+  }
+  if (block.type === "image") {
+    return `<figure><img src="${escapeHtml(block.imageSrc ?? "")}" alt="${escapeHtml(block.imageAlt || block.accessibleText)}"><figcaption>${escapeHtml(block.text)}</figcaption></figure>`;
+  }
+  if (block.type === "link") {
+    return `<p><a href="${escapeHtml(block.linkHref ?? "#")}">${escapeHtml(block.accessibleText || block.text)}</a></p>`;
+  }
+  return `<p>${escapeHtml(block.accessibleText || block.text)}</p>`;
+}
+
 function exportHtml(project: ChapterProject) {
-  const body = project.blocks.map((block) => {
-    if (block.type === "heading") {
-      const level = Math.min(6, Math.max(1, block.headingLevel ?? 2));
-      return `<h${level}>${escapeHtml(block.accessibleText || block.text)}</h${level}>`;
-    }
-    if (block.type === "image") {
-      return `<figure><img src="${escapeHtml(block.imageSrc ?? "")}" alt="${escapeHtml(block.imageAlt || block.accessibleText)}"><figcaption>${escapeHtml(block.text)}</figcaption></figure>`;
-    }
-    if (block.type === "link") {
-      return `<p><a href="${escapeHtml(block.linkHref ?? "#")}">${escapeHtml(block.accessibleText || block.text)}</a></p>`;
-    }
-    return `<p>${escapeHtml(block.accessibleText || block.text)}</p>`;
+  const generatedAt = new Date().toLocaleString("zh-CN", { hour12: false });
+  const body = project.blocks.map((block, index) => {
+    const reason = block.changeReason.trim();
+    const meta = `<div class="review-meta">
+        <span class="review-state status-${block.reviewStatus}">审核状态：${statusLabel(block.reviewStatus)}</span>
+        <span class="review-reason">改写原因：${reason ? escapeHtml(reason) : "（未记录改写原因）"}</span>
+      </div>`;
+    return `<section class="content-block" id="block-${index + 1}" data-block-index="${index + 1}" data-block-type="${block.type}" data-review-status="${block.reviewStatus}" data-change-reason="${escapeHtml(reason)}">
+      ${exportBlockContent(block)}
+      ${meta}
+    </section>`;
   }).join("\n      ");
   return `<!doctype html>
 <html lang="zh-CN">
@@ -367,12 +385,190 @@ function exportHtml(project: ChapterProject) {
     h1, h2, h3, h4, h5, h6 { line-height: 1.4; margin-top: 1.8em; }
     figure { margin: 2em 0; } img { max-width: 100%; height: auto; } figcaption { font-size: .86em; color: #46554f; }
     .skip { position: absolute; left: -9999px; } .skip:focus { position: static; display: inline-block; padding: .5em; background: #fff; }
+    .content-block { border-left: 4px solid #cfd8d4; padding: 2px 0 2px 18px; margin: 1.2em 0; }
+    .content-block[data-review-status="approved"] { border-left-color: #2f8a5f; }
+    .content-block[data-review-status="needs-work"] { border-left-color: #c44b40; }
+    .content-block[data-review-status="pending"] { border-left-color: #cf8a1e; }
+    .review-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: .3em 0 1.3em; padding: .5em .8em; border-radius: 6px; background: #f1f4f2; color: #46554f; font-size: .78em; line-height: 1.5; }
+    .review-state::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #9aa49f; vertical-align: 1px; }
+    .review-state.status-approved::before { background: #2f8a5f; }
+    .review-state.status-needs-work::before { background: #c44b40; }
+    .review-state.status-pending::before { background: #cf8a1e; }
+    .export-footer { margin-top: 3em; padding-top: 14px; border-top: 1px solid #d7ddd9; color: #687570; font-size: .8em; }
   </style>
 </head>
 <body>
   <a class="skip" href="#main">跳到正文</a>
   <main id="main" tabindex="-1">
       ${body}
+      <footer class="export-footer">正式无障碍版本 · 导出于 ${escapeHtml(generatedAt)}。必须修复的问题已清零，每个内容块均保留审核状态与改写原因，供发布前复核。</footer>
+  </main>
+</body>
+</html>`;
+}
+
+function exportReviewHtml(project: ChapterProject, allIssues: AccessibilityIssue[]) {
+  const generatedAt = new Date().toLocaleString("zh-CN", { hour12: false });
+  const countBySeverity = (severity: Severity) => allIssues.filter((issue) => issue.severity === severity).length;
+  const commentEntries = project.blocks.flatMap((block, index) =>
+    block.comments.map((comment) => ({ block, index, comment })));
+  const openCommentCount = commentEntries.filter((entry) => !entry.comment.resolved).length;
+
+  const chapter = project.blocks.map((block, index) => {
+    const source = block.type === "image"
+      ? `${escapeHtml(block.text)}${(block.imageAlt ?? "").trim() ? "" : '<span class="muted">（替代文本缺失）</span>'}`
+      : block.type === "link"
+        ? `${escapeHtml(block.text)} <span class="muted">（${escapeHtml(block.linkHref ?? "#")}）</span>`
+        : escapeHtml(block.text) || '<span class="muted">（空）</span>';
+    const accessibleValue = block.type === "image" ? (block.imageAlt || block.accessibleText) : block.accessibleText;
+    return `<section class="rb" id="block-${escapeHtml(block.id)}" data-status="${block.reviewStatus}">
+      <header class="rb-head">
+        <span class="rb-no">第 ${index + 1} 块</span>
+        <span class="rb-role">${blockRole(block)}</span>
+        <span class="rb-status status-${block.reviewStatus}">${statusLabel(block.reviewStatus)}</span>
+      </header>
+      ${block.type === "image" ? `<div class="rb-image"><img src="${escapeHtml(block.imageSrc ?? "")}" alt=""></div>` : ""}
+      <div class="rb-row"><b>原文</b><p>${source}</p></div>
+      <div class="rb-row"><b>无障碍表达</b><p>${accessibleValue.trim() ? escapeHtml(accessibleValue) : '<span class="muted">（尚未填写）</span>'}</p></div>
+      <div class="rb-row"><b>改写原因</b><p>${block.changeReason.trim() ? escapeHtml(block.changeReason) : '<span class="muted">（未记录）</span>'}</p></div>
+    </section>`;
+  }).join("\n      ");
+
+  const issueSections = project.blocks.map((block, index) => {
+    const blockIssues = allIssues.filter((issue) => issue.blockId === block.id);
+    if (!blockIssues.length) return "";
+    return `<section class="ri-group">
+      <h3><a href="#block-${escapeHtml(block.id)}">第 ${index + 1} 块 · ${blockRole(block)}</a><span class="muted">${escapeHtml(blockSnippet(block, 26))}</span></h3>
+      <ul>
+        ${blockIssues.map((issue) => `<li class="sev-${issue.severity}">
+          <span class="tag tag-${issue.severity}">${severityLabel(issue.severity)}</span>
+          <div><strong>${escapeHtml(issue.title)}</strong><p>${escapeHtml(issue.detail)}</p><p class="sug">建议：${escapeHtml(issue.suggestion)}</p></div>
+        </li>`).join("")}
+      </ul>
+    </section>`;
+  }).join("\n      ");
+
+  const commentsHtml = commentEntries.length
+    ? project.blocks.map((block, index) => {
+      if (!block.comments.length) return "";
+      return `<section class="rc-group">
+      <h3><a href="#block-${escapeHtml(block.id)}">第 ${index + 1} 块 · ${blockRole(block)}</a></h3>
+      ${block.comments.map((comment) => `<article class="rc ${comment.resolved ? "resolved" : ""}">
+        <header><b>${escapeHtml(comment.author)}</b><time>${new Date(comment.createdAt).toLocaleString()}</time>${comment.resolved ? '<span class="tag tag-approved">已解决</span>' : '<span class="tag tag-pending">未解决</span>'}</header>
+        <p>${escapeHtml(comment.body)}</p>
+        ${comment.replies.map((reply) => `<div class="rc-reply"><b>${escapeHtml(reply.author)}</b><time>${new Date(reply.createdAt).toLocaleString()}</time><p>${escapeHtml(reply.body)}</p></div>`).join("")}
+      </article>`).join("")}
+    </section>`;
+    }).join("\n      ")
+    : '<p class="empty">当前章节还没有批注。</p>';
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(project.title)} · 审校稿（非正式无障碍版本）</title>
+  <style>
+    :root { font-family: "Noto Sans SC", sans-serif; font-size: 19px; line-height: 1.8; color: #241d18; background: #fffdf7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    a { color: #0b5e96; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    a:focus-visible, [tabindex]:focus-visible { outline: 4px solid #d08a00; outline-offset: 3px; }
+    .draft-banner { display: flex; gap: 14px; align-items: flex-start; padding: 18px 24px; background: #8f231a; color: #fff7ed; border-bottom: 6px solid #e2a41d; }
+    .draft-banner h2 { margin: 0 0 4px; font-size: 1.12em; }
+    .draft-banner p { margin: 0; font-size: .92em; line-height: 1.7; }
+    .draft-banner strong { color: #ffe08a; }
+    .draft-icon { font-size: 1.9em; line-height: 1.1; }
+    .skip { position: absolute; left: -9999px; } .skip:focus { position: fixed; top: 8px; left: 8px; z-index: 10; padding: .5em .8em; background: #fff; border: 2px solid #0b5e96; border-radius: 6px; }
+    .page { max-width: 820px; margin: 0 auto; padding: 28px 24px 96px; }
+    h1, h2, h3 { line-height: 1.4; }
+    .page-head h1 { margin: .3em 0 .15em; font-size: 1.5em; }
+    .page-head h1 span { display: inline-block; margin-left: 10px; padding: 2px 12px; border-radius: 99px; background: #fde3d9; color: #8f231a; font-size: .55em; vertical-align: middle; }
+    .meta { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 10px 0 0; padding: 10px 14px; border-radius: 8px; background: #f7f3ea; color: #6b6257; font-size: .82em; }
+    .meta b { color: #8f231a; }
+    .page > section { margin-top: 2.2em; }
+    .page > section > h2 { font-size: 1.25em; border-bottom: 2px solid #e4ddcf; padding-bottom: .3em; }
+    .rb { border: 1px solid #e2dccf; border-left: 4px solid #cf8a1e; border-radius: 10px; padding: 12px 16px; margin: 14px 0; background: #fff; }
+    .rb[data-status="approved"] { border-left-color: #2f8a5f; }
+    .rb[data-status="needs-work"] { border-left-color: #c44b40; }
+    .rb-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; font-size: .92em; }
+    .rb-no { font-weight: 700; }
+    .rb-role { color: #7a7166; }
+    .rb-status { margin-left: auto; font-size: .72em; padding: 2px 10px; border-radius: 99px; }
+    .status-approved { background: #e2f3ea; color: #206344; }
+    .status-needs-work { background: #fbe3e0; color: #8f231a; }
+    .status-pending { background: #fdeecf; color: #8a5209; }
+    .rb-row { display: grid; grid-template-columns: 96px 1fr; gap: 10px; margin: 6px 0; font-size: .92em; }
+    .rb-row b { color: #6b6257; font-weight: 700; }
+    .rb-row p { margin: 0; }
+    .muted { color: #8b8378; }
+    .rb-image img { max-width: 220px; max-height: 140px; border-radius: 8px; background: #eee8db; }
+    .tag { display: inline-block; font-size: .78em; padding: 2px 10px; border-radius: 99px; font-weight: 700; white-space: nowrap; }
+    .tag-error { background: #fbe3e0; color: #8f231a; }
+    .tag-warning { background: #fdeecf; color: #8a5209; }
+    .tag-info { background: #e2eff7; color: #1f5e8b; }
+    .tag-approved { background: #e2f3ea; color: #206344; }
+    .tag-pending { background: #fdeecf; color: #8a5209; }
+    .ri-group { margin: 14px 0; }
+    .ri-group h3 { font-size: 1em; margin: 0 0 6px; display: flex; gap: 8px; align-items: baseline; }
+    .ri-group h3 .muted { font-size: .82em; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ri-group ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .ri-group li { display: grid; grid-template-columns: 86px 1fr; gap: 10px; border: 1px solid #e7e0d3; border-left-width: 4px; border-radius: 8px; padding: 9px 12px; background: #fff; }
+    .ri-group li.sev-error { border-left-color: #b9362d; }
+    .ri-group li.sev-warning { border-left-color: #cf8a1e; }
+    .ri-group li.sev-info { border-left-color: #2b7aa8; }
+    .ri-group strong { display: block; font-size: .95em; }
+    .ri-group p { margin: 3px 0; font-size: .9em; color: #585045; }
+    .ri-group .sug { color: #2c6a50; }
+    .rc-group { margin: 16px 0; }
+    .rc-group h3 { font-size: 1em; margin: 0 0 6px; }
+    .rc { border: 1px solid #e7e0d3; border-left: 3px solid #c4832a; border-radius: 8px; padding: 10px 14px; margin: 8px 0; background: #fff; }
+    .rc.resolved { border-left-color: #3c9a6b; }
+    .rc.resolved:not(:hover) { opacity: .72; }
+    .rc header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .8em; color: #7a7166; }
+    .rc p { margin: 5px 0; font-size: .92em; }
+    .rc-reply { margin: 6px 0 0 14px; padding-left: 10px; border-left: 2px solid #e6e0d4; font-size: .92em; }
+    .rc-reply p { margin: 2px 0; }
+    .empty { color: #7d7468; background: #f7f3ea; border-radius: 8px; padding: 14px 16px; font-size: .92em; }
+    body::after { content: "审校稿 · 非正式版本"; position: fixed; right: -70px; bottom: 130px; transform: rotate(-32deg); font-size: 44px; font-weight: 800; color: rgba(143, 35, 26, .09); pointer-events: none; white-space: nowrap; z-index: 1; }
+    @media print { .draft-banner { -webkit-print-color-adjust: exact; print-color-adjust: exact; } body::after { color: rgba(143, 35, 26, .14); } }
+  </style>
+</head>
+<body>
+  <div class="draft-banner">
+    <span class="draft-icon" aria-hidden="true">⚠</span>
+    <div>
+      <h2>审校稿 · 非正式无障碍版本</h2>
+      <p>本网页由工作台导出，仅供审校流转，包含未定稿的章节内容、待处理问题与批注，<strong>不能作为正式无障碍版本发布、归档或替代教材成品</strong>。必须修复的问题清零后，请在工作台重新导出正式无障碍 HTML。</p>
+    </div>
+  </div>
+  <a class="skip" href="#chapter">跳到章节内容</a>
+  <main id="main" tabindex="-1" class="page">
+    <header class="page-head">
+      <h1>${escapeHtml(project.title)}<span>审校包</span></h1>
+      <ul class="meta">
+        <li>${escapeHtml(project.subject)} · ${escapeHtml(project.grade)}</li>
+        <li>导出于 ${escapeHtml(generatedAt)}</li>
+        <li>内容块 ${project.blocks.length} 个</li>
+        <li>待处理项 <b>${countBySeverity("error")}</b> 必须修复 / ${countBySeverity("warning")} 建议优化 / ${countBySeverity("info")} 术语提醒</li>
+        <li>批注 ${commentEntries.length} 条（未解决 <b>${openCommentCount}</b>）</li>
+      </ul>
+    </header>
+
+    <section id="chapter">
+      <h2>一、章节内容</h2>
+      ${chapter}
+    </section>
+
+    <section id="issues">
+      <h2>二、待处理项（${allIssues.length}）</h2>
+      ${allIssues.length ? issueSections : '<p class="empty">当前没有待处理的无障碍问题。</p>'}
+    </section>
+
+    <section id="comments">
+      <h2>三、批注与回复（${commentEntries.length}）</h2>
+      ${commentsHtml}
+    </section>
   </main>
 </body>
 </html>`;
@@ -408,6 +604,7 @@ let activeIssueId = "";
 let previewMode: "normal" | "assisted" = "normal";
 let selectedVersionId = "";
 let showGlossary = false;
+let showExportBlocker = false;
 let undoStack: ChapterProject[] = [];
 let redoStack: ChapterProject[] = [];
 let saveTimer = 0;
@@ -480,7 +677,8 @@ function render() {
           <sl-button size="small" variant="default" ${undoStack.length ? "" : "disabled"} data-action="undo">撤销</sl-button>
           <sl-button size="small" variant="default" ${redoStack.length ? "" : "disabled"} data-action="redo">重做</sl-button>
           <sl-button size="small" variant="default" data-action="glossary">术语表</sl-button>
-          <sl-button size="small" variant="primary" data-action="save-version">保存版本</sl-button>
+          <sl-button size="small" variant="default" data-action="save-version">保存版本</sl-button>
+          <sl-button size="small" variant="warning" outline data-action="export-review">导出审校包</sl-button>
           <sl-button size="small" variant="success" data-action="export">导出无障碍 HTML</sl-button>
         </div>
       </header>
@@ -524,7 +722,7 @@ function render() {
           </div>
 
           ${activeIssues.length ? `<div class="active-issues">${activeIssues.map((issue) => `
-            <div class="issue-card ${issue.severity}">
+            <div class="issue-card ${issue.severity}" id="issue-card-${issue.id}" data-issue-id="${issue.id}">
               <div><sl-badge variant="${issue.severity === "error" ? "danger" : issue.severity === "warning" ? "warning" : "primary"}">${severityLabel(issue.severity)}</sl-badge><strong>${escapeHtml(issue.title)}</strong></div>
               <p>${escapeHtml(issue.detail)}</p><small>${escapeHtml(issue.suggestion)}</small>
             </div>`).join("")}</div>` : `<div class="issue-clear">✓ 当前内容块没有新的无障碍问题</div>`}
@@ -598,6 +796,35 @@ function render() {
       </div>
       <div class="term-add"><sl-input id="new-term-source" placeholder="原文术语"></sl-input><sl-input id="new-term-preferred" placeholder="统一表达"></sl-input><sl-button variant="primary" data-action="add-term">添加术语</sl-button></div>
       <sl-button slot="footer" variant="primary" data-action="close-glossary">完成</sl-button>
+    </sl-dialog>
+
+    <sl-dialog label="还有必须修复的问题，正式导出已暂停" class="export-blocker-dialog" ${showExportBlocker ? "open" : ""} data-dialog="export-blocker">
+      ${(() => {
+        const blocking = list.filter((issue) => issue.severity === "error");
+        if (!blocking.length) return "";
+        const groups = project.blocks
+          .map((block, index) => ({ block, index, items: blocking.filter((issue) => issue.blockId === block.id) }))
+          .filter((group) => group.items.length);
+        return `<p class="blocker-intro">正式无障碍 HTML 必须先清零 <b>${blocking.length}</b> 个必须修复的问题，涉及 <b>${groups.length}</b> 个内容块。问题位置与原因如下，问题清零后可重新导出；审校阶段可使用「导出审校包」流转。</p>
+          <div class="blocker-groups">
+            ${groups.map(({ block, index, items }) => `
+              <section class="blocker-group">
+                <header>
+                  <div class="blocker-loc"><b>第 ${index + 1} 块 · ${blockRole(block)}</b><span>${escapeHtml(blockSnippet(block))}</span></div>
+                  <sl-button size="small" variant="default" outline data-action="jump-block-issue" data-block-id="${block.id}" data-issue-id="${items[0].id}">定位此块</sl-button>
+                </header>
+                <ul>
+                  ${items.map((issue) => `<li>
+                    <strong>${escapeHtml(issue.title)}</strong>
+                    <p>${escapeHtml(issue.detail)}</p>
+                    <small>建议：${escapeHtml(issue.suggestion)}</small>
+                  </li>`).join("")}
+                </ul>
+              </section>`).join("")}
+          </div>`;
+      })()}
+      <sl-button slot="footer" variant="default" data-action="close-export-blocker">继续修改</sl-button>
+      <sl-button slot="footer" variant="primary" data-action="locate-first-issue" data-block-id="${(list.find((issue) => issue.severity === "error")?.blockId) ?? ""}" data-issue-id="${(list.find((issue) => issue.severity === "error")?.id) ?? ""}">定位到第一处</sl-button>
     </sl-dialog>`;
 
   wireLiveFields();
@@ -753,11 +980,53 @@ app.addEventListener("click", (event) => {
     commit("全部审核通过", (draft) => { draft.blocks.forEach((block) => { block.reviewStatus = "approved"; }); });
   }
   if (action === "export") {
+    const blocking = issues().filter((issue) => issue.severity === "error");
+    if (blocking.length) {
+      showExportBlocker = true;
+      render();
+      return;
+    }
     download(`${project.title}-无障碍版.html`, exportHtml(project));
-    document.documentElement.dataset.lastAction = "已导出无障碍 HTML";
+    document.documentElement.dataset.lastAction = "已导出正式无障碍 HTML（含审核状态与改写原因）";
     render();
   }
+  if (action === "export-review") {
+    showExportBlocker = false;
+    download(`${project.title}-审校包（非正式版本）.html`, exportReviewHtml(project, issues()));
+    document.documentElement.dataset.lastAction = "已导出审校包（非正式无障碍版本）";
+    render();
+  }
+  if (action === "close-export-blocker") {
+    showExportBlocker = false;
+    render();
+  }
+  if (action === "locate-first-issue" || action === "jump-block-issue") {
+    const issueId = target.dataset.issueId ?? "";
+    const blockId = target.dataset.blockId ?? activeBlockId;
+    showExportBlocker = false;
+    activeIssueId = issueId;
+    activeBlockId = blockId;
+    render();
+    requestAnimationFrame(() => {
+      const issueElement = app.querySelector<HTMLElement>(`#issue-card-${CSS.escape(issueId)}`)
+        ?? app.querySelector<HTMLElement>(".active-issues")
+        ?? app.querySelector<HTMLElement>(".editor-panel");
+      issueElement?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
   if (action === "import") app.querySelector<HTMLInputElement>("#chapter-file")?.click();
+});
+
+app.querySelectorAll<HTMLElement>('sl-dialog[data-dialog="export-blocker"], sl-dialog[data-dialog="glossary"]').forEach((dialog) => {
+  dialog.addEventListener("sl-hide", () => {
+    if (dialog.dataset.dialog === "export-blocker" && showExportBlocker) {
+      showExportBlocker = false;
+      render();
+    }
+    if (dialog.dataset.dialog === "glossary" && showGlossary) {
+      showGlossary = false;
+    }
+  });
 });
 
 app.addEventListener("sl-change", (event) => {
